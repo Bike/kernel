@@ -1,0 +1,1 @@
+This is a simple and, for now at least, unfinished implementation of the Kernel dialect of Lisp, written in CL.  For more information on Kernel, see <http://web.cs.wpi.edu/~jshutt/kernel.html>.
