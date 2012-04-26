@@ -6,13 +6,15 @@
 
 (defun interpreter ()
   "Interface to the Kernel interpreter."
-  (let ((working-environment (make-k-environment :parents (list *ground-environment*)))
-	(*package* (find-package 'kernel)))
-    (loop
-       (format t "~&kernel> ")
-       (let ((sexp (cl->kernel (read))))
-	 (fresh-line)
-	 (interpret sexp working-environment #'princ)))))
+  (with-simple-restart (abort "Exit the Kernel interpreter.")
+    (let ((working-environment (make-k-environment :parents (list *ground-environment*)))
+	  (*package* (find-package 'kernel)))
+      (loop
+	 (with-simple-restart (abort "Return to the Kernel interpreter.")
+	   (format t "~&kernel> ")
+	   (let ((sexp (cl->kernel (read))))
+	     (fresh-line)
+	     (interpret sexp working-environment #'princ)))))))
 
 (defun cl->kernel (obj)
   "Convert a CL structure to a Kernel list.  Signals an error on unknown types.  Does not halt on cyclic lists."
