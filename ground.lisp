@@ -196,7 +196,10 @@
 
 (define-kernel-primitive kp:unwrap nil (((combiner k-applicative)) env cont)
   "Return the underlying combiner of combiner."
-  (funcall cont (combiner-code combiner)))
+  ;; If said underlying combiner is a CL function, we have to fake it by making an operative.
+  (funcall cont (if (functionp (combiner-code combiner))
+		    (make-instance 'k-operative-primitive :code (combiner-code combiner))
+		    (combiner-code combiner))))
 
 ;;; WARNING: HACKY AND BAD.  This is just so I can play around.
 ;;; Partly to unconfuse myself: Kernel continuations are NOT combiners.
