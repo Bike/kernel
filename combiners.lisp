@@ -53,24 +53,34 @@
   (declare (ignore depth))
   (print-unreadable-object (object stream :type t :identity t)))
 
+;;; Parent of all Kernel conditions.
+(define-condition kernel-condition (condition) ())
+
+;;; Errors
+(define-condition kernel-error (kernel-condition) ())
+
 ;;; This condition is signalled when an unbound variable is referenced in Kernel.
 ;;; TODO: Add report function.
-(define-condition kernel-unbound-symbol (unbound-variable) ((env :initarg :env :reader env)))
+(define-condition kernel-unbound-symbol (unbound-variable kernel-error) ((env :initarg :env :reader env)))
 
 ;;; This condition is signalled when an applicative is called with too many arguments.
 ;;; TODO: Add report function.
-(define-condition kernel-too-many-arguments-passed (error)
+(define-condition kernel-too-many-arguments-passed (error kernel-error)
   ;; The parameter tree.
   ((ptree :initarg :ptree :reader ptree)
    ;; The Kernel list of arguments passed.
-   (otree :initarg :otree :reader otree)))
+   (otree :initarg :otree :reader otree))
+  (:report (lambda (condition stream)
+	     (format stream "Too many arguments in ~s to match parameter list ~s" (otree condition) (ptree condition)))))
 
 ;;; This condition is signalled when an applicative isn't called with enough arguments.
 ;;; TODO: Blablabla, nobody likes writing error reporting code.
 ;;; And make this a subclass of something that too-many-args is?  meh
-(define-condition kernel-not-enough-arguments-passed (error)
+(define-condition kernel-not-enough-arguments-passed (error kernel-error)
   ((ptree :initarg :ptree :reader ptree)
-   (otree :initarg :otree :reader otree)))
+   (otree :initarg :otree :reader otree))
+  (:report (lambda (condition stream)
+	     (format stream "Not enough arguments in ~s to match parameter list ~s" (otree condition) (ptree condition)))))
 
 (defun lookup (ksym env)
   "Look up a Kernel symbol in a Kernel environment, returning its value, or signalling an error if it isn't bound."
@@ -79,10 +89,18 @@
     (if binding
 	(cdr binding)
 	;; Not bound in this environment, so check the parents.
-	(dolist (parent (k-environment-parents env) (error 'kernel-unbound-symbol :name ksym :env env))
-	  (handler-case (lookup ksym parent)
-	    (kernel-unbound-symbol ())
-	    (:no-error (v) (return-from lookup v)))))))
+	(restart-case
+	    (dolist (parent (k-environment-parents env) (error 'kernel-unbound-symbol :name ksym :env env))
+	      (handler-case (lookup ksym parent)
+		(kernel-unbound-symbol ())
+		(:no-error (v) (return-from lookup v))))
+	  (use-value (value)
+	    :report "Specify a value to use this time."
+	    value)
+	  (store-value (value)
+	    :report "Specify a value to store and use in the future."
+	    (augment-environment ksym value env)
+	    value)))))
 
 (defun vet-ptree (parameter-tree)
   "Signal an error if parameter-tree is invalid.  See 4.9.1."
@@ -127,8 +145,71 @@
 (defvar *ground-environment* (make-k-environment :parents nil :bindings nil)
   "Ground environment for the Kernel interpreter, filled with R-1SK's functions.")
 
-(defpackage kernel-primitives)
+(defmacro k-destructuring-bind (list expression &body body)
+  (let ((wholesym (gensym "WHOLE"))
+	(checks nil)
+	(bindings nil))
+    (labels ((cons-aux (list path-so-far)
+	       ;; doesn't work on circular lists, but this is in the CL bit, come on
+	       (do ((n 0 (1+ n))
+		    (path path-so-far `(k-cdr ,path))
+		    (ptr list (cdr ptr)))
+		   ((not (consp ptr))
+		    (etypecase ptr
+		      (null (push `(proper-k-list-of-length-or-error ',list ,path-so-far ,n) checks))
+		      (symbol (push `(k-list-of-length-at-least-or-error ',list ,path-so-far ,n) checks)
+			      (push (list ptr path) bindings))))
+		 (etypecase (car ptr)
+		   (symbol (push (list (car ptr) `(k-car ,path)) bindings))
+		   (list (aux (car ptr) `(k-car ,path))))))
+	     (aux (list path-so-far)
+	       (etypecase list
+		 (null)
+		 (symbol (push (list list path-so-far) bindings))
+		 (cons (cons-aux list path-so-far)))))
+      (aux list wholesym)
+      `(let ((,wholesym ,expression))
+	 ,@checks
+	 (let (,@bindings)
+	   ,@body)))))
 
+(defun proper-k-list-of-length-or-error (match k-list length)
+  (multiple-value-bind (ignore acyclic cyclic) (decycle k-list)
+    (declare (ignore ignore)) ; should use a nonconsing version instead
+    (cond ((not (zerop cyclic))
+	   (error 'kernel-too-many-arguments-passed :otree k-list :ptree match))
+	  ((> acyclic length)
+	   (error 'kernel-too-many-arguments-passed :otree k-list :ptree match))
+	  ((< acyclic length)
+	   (error 'kernel-not-enough-arguments-passed :otree k-list :ptree match)))))
+
+(defun k-list-of-length-at-least-or-error (match k-list length)
+  (do ((n 0 (1+ n))
+       (ptr k-list (k-cdr ptr)))
+      ((= length n))
+    (when (not (k-cons-p ptr))
+      (error 'kernel-not-enough-arguments-passed :otree k-list :ptree match))))
+
+(defmacro define-kernel-primitive (name operative-p (args env cont) &body body)
+  "Define a CL function as a Kernel primitive.  See comments on kernel-operative-primitive for calling convention."
+  `(progn ,(if (symbolp args)
+	       `(defun ,name (,args ,env ,cont)
+		  (declare (ignorable ,env))
+		  ,@body)
+	       (let ((wholesym (gensym "WHOLE"))
+		     (argtypes (mapcar (lambda (thing) (if (symbolp thing) t (second thing))) args))
+		     (argnames (mapcar (lambda (thing) (if (symbolp thing) thing (first thing))) args)))
+		 `(defun ,name (,wholesym ,env ,cont)
+		    (declare (ignorable ,env)) ;; aw yeah
+		    (k-destructuring-bind ,argnames ,wholesym
+		      ,@(mapcar (lambda (name type) `(check-type ,name ,type)) argnames argtypes)
+		      ,@body))))
+	  (push (cons ',name
+		      (make-instance ',(if operative-p 'k-operative-primitive 'k-applicative-primitive)
+				     :code (function ,name)))
+		(k-environment-bindings *ground-environment*))))
+
+#||
 (defmacro define-kernel-primitive (name operative-p (args env cont) &body body)
   "Define a CL function as a Kernel primitive.  See comments on kernel-operative-primitive for calling convention."
   ;; Do some shit with symbols here?  I do not understand packaging...
@@ -137,3 +218,4 @@
 		      (make-instance ',(if operative-p 'k-operative-primitive 'k-applicative-primitive)
 				     :code (function ,name)))
 		(k-environment-bindings *ground-environment*))))
+||#

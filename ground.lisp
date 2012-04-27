@@ -21,15 +21,23 @@
       (kernel-too-many-arguments-passed () (error 'kernel-too-many-arguments-passed :ptree structure :otree args))
       (kernel-not-enough-arguments-passed () (error 'kernel-not-enough-arguments-passed :ptree structure :otree args)))))
 
-(define-kernel-primitive boolean? nil (args environment continuation)
+(defpackage kernel-primitives
+  (:nicknames :kp)
+  (:use :kernel)
+  (:import-from :cl :nil)
+  (:shadow :cons :eval)
+  (:export :boolean? :eq? :equal? :symbol? :$if :pair? :null? :cons
+	   :set-car! :set-cdr! :copy-es-immutable :environment?
+	   :inert? :make-environment :$define! :operative? :$vau
+	   :applicative? :wrap :unwrap :call/cc :extend-continuation
+	   :continuation->applicative :eval))
+
+(define-kernel-primitive kp:boolean? nil (args environment continuation)
   "Returns #t if all of its arguments are booleans, and #f otherwise."
-  (declare (ignore environment))
   (funcall continuation (k-every #'(lambda (x) (typep x 'boolean)) args)))
 
-(define-kernel-primitive eq? nil (args environment continuation)
+(define-kernel-primitive kp:eq? nil ((obj1 obj2) environment continuation)
   "Returns #t if its two arguments are eq as specified in 4.2.1, and #f otherwise."
-  (declare (ignore environment))
-  (check-args '(obj1 obj2) args)
   (let ((seen (list)))
     ;; A set of pairs of objects that have been seen together and which are thus considered eq?.
     ;; (lol cyclic structures amirite)
@@ -46,13 +54,11 @@
 			      (and (aux (k-car obj1) (k-car obj2))
 				   (aux (k-cdr obj1) (k-cdr obj2)))))
 		   (eq obj1 obj2))))
-     (funcall continuation (aux (k-car args) (k-car (k-cdr args)))))))
+     (funcall continuation (aux obj1 obj2)))))
 
-(define-kernel-primitive equal? nil (args env cont)
+(define-kernel-primitive kp:equal? nil ((obj1 obj2) env cont)
   "Returns #t if just go read 4.3.1."
   ;; Probably going to have to fix this to deal with other types.
-  (declare (ignore env))
-  (check-args '(obj1 obj2) args)
   ;; This works more or less the same as eq? up there.
   (let ((seen (list)))
     (labels ((aux (obj1 obj2)
@@ -65,101 +71,76 @@
 				   (aux (k-cdr obj1) (k-cdr obj2)))))
 		   ;; Here's where fancier tests for other types whould go.
 		   (eq obj1 obj2))))
-      (funcall cont (aux (k-car args) (k-car (k-cdr args)))))))
+      (funcall cont (aux obj1 obj2)))))
 
-(define-kernel-primitive symbol? nil (args env cont)
+(define-kernel-primitive kp:symbol? nil (args env cont)
   "Returns #t if all of its arguments are Kernel symbols."
-  (declare (ignore env))
   (funcall cont (k-every #'(lambda (x) (typep x 'k-symbol)) args)))
 
-(define-kernel-primitive $if t (args env cont)
+(define-kernel-primitive kp:$if t ((antecedent consequent alternative) env cont)
   "Returns the evaluation of its second argument if its first evaluates to #t, its third if it's #f, and error otherwise."
-  (check-args '(antecedent consequent alternative) args)
-  (interpret (k-car args) env
-	     #'(lambda (result)
-		 (case result
-		   ((t) (interpret (k-car (k-cdr args)) env cont))
-		   ((nil) (interpret (k-car (k-cdr (k-cdr args))) env cont))
-		   (error "Antecedent of $if not a boolean: ~a" result)))))
+  (interpret antecedent env
+	     (lambda (result)
+	       (case result
+		 ((t) (interpret consequent env cont))
+		 ((nil) (interpret alternative env cont))
+		 (error "Antecedent of $if not a boolean: ~s" result)))))
 
-(define-kernel-primitive pair? nil (args env cont)
+(define-kernel-primitive kp:pair? nil (args env cont)
   "Returns #t if all of its arguments are Kernel pairs, #f otherwise."
-  (declare (ignore env))
   (funcall cont (k-every #'k-cons-p args)))
 
-(define-kernel-primitive null? nil (args env cont)
+(define-kernel-primitive kp:null? nil (args env cont)
   "Returns #t if all of its arguments are Kernel (), #f otherwise."
-  (declare (ignore env))
   (funcall cont (k-every #'(lambda (x) (eq x %nil)) args)))
 
-;;; This is very ugly.
-(push (cons 'cons (make-instance 'k-applicative-primitive
-				 :code #'(lambda (args env cont)
-					   (declare (ignore env))
-					   (check-args '(obj1 obj2) args)
-					   ;; In case like I you thought "can't we just return the arglist"
-					   ;; the answer is "no", because
-					   ;; ($define! x (list 1 2))
-					   ;; ($define! oh-shi- (eval (cons cons x) (get-current-environment)))
-					   ;; (set-car! x 3)
-					   ;; oh-shi- must be a cons of 1 and 2 at this point.
-					   (funcall cont (k-cons (k-car args) (k-car (k-cdr args)))))))
-      (k-environment-bindings *ground-environment*))
+(define-kernel-primitive kp:cons nil ((obj1 obj2) env cont)
+  ;; In case like I you thought "can't we just return the arglist"
+  ;; the answer is "no", because
+  ;; ($define! x (list 1 2))
+  ;; ($define! oh-shi- (eval (cons cons x) (get-current-environment)))
+  ;; (set-car! x 3)
+  ;; oh-shi- must be a cons of 1 and 2 at this point.
+  (funcall cont (k-cons obj1 obj2)))
 
-(define-kernel-primitive set-car! nil (args env cont)
+(define-kernel-primitive kp:set-car! nil ((pair object) env cont)
   "Set the car of a Kernel pair, erring if it's not actually a mutable pair."
-  (declare (ignore env))
-  (check-args '(pair object) args)
-  (if (and (k-cons-p (k-car args))
-	   (not (k-cons-immutable-p (k-car args))))
-      (setf (k-car (k-car args)) (k-car (k-cdr args)))
-      (error "Tried to mutate non-mutable-pair ~a" (k-car args)))
+  (if (and (k-cons-p pair)
+	   (not (k-cons-immutable-p pair)))
+      (setf (k-car pair) object)
+      (error "Tried to mutate non-mutable-pair ~a" pair))
   (funcall cont %inert))
 
-(define-kernel-primitive set-cdr! nil (args env cont)
+(define-kernel-primitive kp:set-cdr! nil ((pair object) env cont)
   "Set the cdr of a Kernel pair, erring if it's not actually a mutable pair."
-  (declare (ignore env))
-  (check-args '(pair object) args)
-  (if (and (k-cons-p (k-car args))
-	   (not (k-cons-immutable-p (k-car args))))
-      (setf (k-cdr (k-car args)) (k-car (k-cdr args)))
-      (error "Tried to mutate non-mutable-pair ~a" (k-car args)))
+  (if (and (k-cons-p pair)
+	   (not (k-cons-immutable-p pair)))
+      (setf (k-cdr pair) object)
+      (error "Tried to mutate non-mutable-pair ~a" pair))
   (funcall cont %inert))
 
-(define-kernel-primitive copy-es-immutable nil (args env cont)
+(define-kernel-primitive kp:copy-es-immutable nil ((object) env cont)
   "If object isn't a pair, return it; otherwise, return an immutable pair equal? to it."
-  (declare (ignore env))
-  (check-args '(object) args)
-  (funcall cont (k-copy-immutable (k-car args))))
+  (funcall cont (k-copy-immutable object)))
 
-(define-kernel-primitive environment? nil (args env cont)
+(define-kernel-primitive kp:environment? nil (args env cont)
   "Returns #t if all its arguments are Kernel pairs, and #f otherwise."
-  (declare (ignore env))
   (funcall cont (k-every #'k-environment-p args)))
 
-(define-kernel-primitive inert? nil (args env cont)
+(define-kernel-primitive kp:inert? nil (args env cont)
   "Returns #t if all its arguments are #inert, and #f otherwise."
-  (declare (ignore env))
   (funcall cont (k-every #'(lambda (x) (eq x %inert)) args)))
 
-;;; Again, ugly.  TODO: Ugh, gross, make it stop.
-(push (cons 'eval (make-instance 'k-applicative-primitive
-				 :code #'(lambda (args env cont)
-					   (declare (ignore env)) ; heh, funny how that works
-					   (check-args '(expression environment) args)
-					   (interpret (k-car args)
-						      (k-car (k-cdr args))
-						      cont))))
-      (k-environment-bindings *ground-environment*))
+(define-kernel-primitive kp:eval nil ((expression environment) env cont)
+  (interpret expression environment cont))
 
 ;;; This converts the possibly cyclic argument list to an acyclic CL list
 ;;; so that lookup can be slightly faster, not to mention easier to write.
 ;;; SIDENOTE: 4.8.4 specifies that if an environment's list of parents is cyclic,
 ;;; it will "still" check them all "at most once" - wouldn't "exactly once"
 ;;; or "at least once" (not that there's any reason to check more than once) make more sense?
-(define-kernel-primitive make-environment nil (args env cont)
+(define-kernel-primitive kp:make-environment nil (args env cont)
   "Construct and return a new, empty environment, with the specified parent environments."
-  (declare (ignore env)) ; again, heh.
   (flet ((convert-arglist (k-list)
 	   ;; Quick helper function to make a CL list out of an already decycled Kernel list.
 	   ;; 3.2 says we have to preserve the order of the parents, keep in mind.
@@ -175,73 +156,59 @@
     ;; Note that decycle will error if args isn't a Kernel list, but we'd do that anyway, so meh.
     (funcall cont (make-k-environment :parents (convert-arglist (decycle args)) :bindings nil))))
 
-(define-kernel-primitive $define! t (args env cont)
+(define-kernel-primitive kp:$define! t ((definiend expression) env cont)
   "Bind definiend to (eval expression [the dynamic environment]) in the dynamic environment, then return #inert."
-  (check-args '(definiend expression) args)
   ;; We're gonna pass off the (necessary) job of verifying that definiend is valid parameter tree
   ;; to some other function, in probably types.lisp.  Yay
-  (vet-ptree (k-car args))
-  (interpret (k-car (k-cdr args))
+  (vet-ptree definiend)
+  (interpret expression
 	     env
 	     #'(lambda (expression)
-		 (augment-environment (k-car args) expression env)
+		 (augment-environment definiend expression env)
 		 (funcall cont %inert))))
 
-(define-kernel-primitive operative? nil (args env cont)
+(define-kernel-primitive kp:operative? nil (args env cont)
   "Return #t if all arguments are operatives, else #f."
-  (declare (ignore env))
   (funcall cont (k-every #'(lambda (x) (typep x 'k-operative)) args)))
 
-(define-kernel-primitive applicative? nil (args env cont)
+(define-kernel-primitive kp:applicative? nil (args env cont)
   "Return #t if all arguments are applicatives, or otherwise #f."
-  (declare (ignore env))
   (funcall cont (k-every #'(lambda (x) (typep x 'k-applicative)) args)))
 
-(define-kernel-primitive $vau t (args env cont)
+(define-kernel-primitive kp:$vau t ((formals (eformal (or k-symbol k-ignore)) expr) env cont)
   "Construct and return a new operative, in accordance with 4.10.3."
-  (check-args '(formals eformal expr) args)
-  (vet-ptree (k-car args))
-  (check-type (k-car (k-cdr args)) (or k-symbol k-ignore))
+  (vet-ptree formals)
   (funcall cont
 	   (make-instance 'k-operative-compound
-			  :code (k-copy-immutable (k-car (k-cdr (k-cdr args))))
+			  :code (k-copy-immutable expr)
 			  ;; "A stored copy of the formal parameter tree
 			  ;; formals is matched in the local environment" - 4.10.3.2
 			  ;; a bit ambiguous, but altering parameter trees is agh why.
-			  :args (k-copy-immutable (k-car args))
-			  :envparam (k-car (k-cdr args))
+			  :args (k-copy-immutable formals)
+			  :envparam eformal
 			  :env env)))
 
-(define-kernel-primitive wrap nil (args env cont)
+(define-kernel-primitive kp:wrap nil (((combiner k-combiner)) env cont)
   "Construct and return a new applicative around the provided operative."
-  (declare (ignore env))
-  (check-args '(combiner) args)
-  (check-type (k-car args) k-combiner)
   (funcall cont
 	   (make-instance 'k-applicative-compound
-			  :code (k-car args))))
+			  :code combiner)))
 
-(define-kernel-primitive unwrap nil (args env cont)
+(define-kernel-primitive kp:unwrap nil (((combiner k-applicative)) env cont)
   "Return the underlying combiner of combiner."
-  (declare (ignore env))
-  (check-args '(combiner) args)
-  (check-type (k-car args) k-applicative)
-  (funcall cont (combiner-code (k-car args))))
+  (funcall cont (combiner-code combiner)))
 
 ;;; WARNING: HACKY AND BAD.  This is just so I can play around.
 ;;; Partly to unconfuse myself: Kernel continuations are NOT combiners.
-(define-kernel-primitive call/cc nil (args env cont)
+(define-kernel-primitive kp:call/cc nil (((combiner k-combiner)) env cont)
   "Call the one argument with an object representing the current continuation of computation."
-  (check-args '(combiner) args)
-  (check-type (k-car args) k-combiner)
-  (interpret (k-cons (k-car args) (k-cons cont %nil))
+  (interpret (k-cons combiner (k-cons cont %nil))
 	     env
 	     cont))
 
-(define-kernel-primitive extend-continuation nil (args env cont)
+(define-kernel-primitive kp:extend-continuation nil (args env cont)
   "Return a continuation that applies (unwrap applicative) to its argument, then passes that result to continuation."
   ;; I'm not 100% sure on what this thing does.
-  (declare (ignore env))
   (check-type args k-cons)
   (check-type (k-car args) function) ; should be continuation type (more specifically, a 3-ary function.)
   (check-type (k-cdr args) k-cons) ; this is stupid, but SAFETY!! (ololol.)
@@ -263,20 +230,17 @@
 				 environment
 				 continuation)))))
 
-(define-kernel-primitive continuation->applicative nil (args env cont)
+(define-kernel-primitive kp:continuation->applicative nil (((continuation function)) env cont)
   "Return an applicative whose underlying operative abnormally passes its operand tree to continuation."
-  (declare (ignore env))
-  (check-args '(continuation) args)
-  (check-type (k-car args) function) ; should be continuation type
   (funcall cont
 	   (make-instance 'k-applicative-compound
 			  :code (make-instance 'k-operative-primitive
 					       :code #'(lambda (a env cont)
 							 (declare (ignore env cont))
-							 (funcall (k-car args) a))))))
+							 (funcall continuation a))))))
 
 ;;;; Derived library begins here
-#|
+#||
 (define-kernel-primitive $sequence t (args env cont)
   (if (eq args %nil)
       ;; ($sequence) => #inert
@@ -306,4 +270,4 @@
 							   (k-car k-list)
 							   (k-cons (k-car k-list) (aux (k-cdr k-list))))))
 					      (funcall cont (aux args)))))))
-|#
+||#

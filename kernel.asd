@@ -2,6 +2,7 @@
 
 (asdf:defsystem :kernel
   :serial t
+  :depends-on (#:string-case)
   :version "0.1"
   :components ((:file "package")
 	       (:file "types")

@@ -8,7 +8,7 @@
   "Interface to the Kernel interpreter."
   (with-simple-restart (abort "Exit the Kernel interpreter.")
     (let ((working-environment (make-k-environment :parents (list *ground-environment*)))
-	  (*package* (find-package 'kernel)))
+	  (*package* (find-package 'kernel-primitives)))
       (loop
 	 (with-simple-restart (abort "Return to the Kernel interpreter.")
 	   (format t "~&kernel> ")
@@ -22,17 +22,15 @@
     (cons (k-cons (cl->kernel (car obj)) (cl->kernel (cdr obj))))
     (null %nil)
     (symbol
-     (case obj
+     (string-case ((symbol-name obj) :default obj)
        ;; Some constant symbols.
        ;; At least for now, %t is CL:t, %f is CL:nil,
        ;; and the others are unforgeable constants, namely, instances of unique structs
        ;; (see types.lisp)
-       (%t t)
-       (%f nil)
-       (%inert %inert)
-       (%ignore %ignore)
-       ;; And the most important step...
-       (otherwise obj)))))
+       ("%T" t)
+       ("%F" nil)
+       ("%INERT" %inert)
+       ("%IGNORE" %ignore)))))
 
 (defun interpret (expression environment continuation)
   "Interpret a Kernel list in a Kernel environment and pass the result to cont, a CL function."

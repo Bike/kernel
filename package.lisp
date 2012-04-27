@@ -1,5 +1,5 @@
 ;;;; Package definition for the Kernel system.
 
 (defpackage kernel
-  (:use common-lisp)
+  (:use :cl :string-case)
   (:export :interpreter))

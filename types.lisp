@@ -151,6 +151,17 @@
       ;; Seriously, indentation of these things is so bothersome.
       (aux k-list 0 k-list 0))))
 
+(defun k-list-length (k-list)
+  (when (k-null-p k-list) (return-from k-list-length 0))
+  (check-type k-list k-cons)
+  (do ((n 0 (+ n 2))
+       (fast k-list (k-cdr (k-cdr fast)))
+       (slow k-list (k-cdr slow)))
+      (nil)
+    (when (k-null-p fast) (return n))
+    (when (k-null-p (k-cdr fast)) (return (1+ n)))
+    (when (and (eq fast slow) (plusp n)) (return nil))))
+
 (defun k-copy-immutable (obj)
   "If object isn't a pair, return it; otherwise, return an immutable pair Kernel-equal? to it."
   (let ((seen nil))
